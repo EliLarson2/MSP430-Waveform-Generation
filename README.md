@@ -4,37 +4,6 @@ A mixed-signal embedded system built around the **Texas Instruments MSP430FR2355
 
 The project began as a sequence of embedded-systems laboratory exercises and culminated in a UART-controlled application capable of interacting with multiple digital and analog peripherals.
 
-The final system connects several layers of embedded engineering:
-
-```text
-Serial Command
-      |
-      v
-Embedded Firmware
-      |
-      +----------+----------+----------+
-      |          |          |          |
-      v          v          v          v
-     ADC       GPIO        PWM        NCO
-                           Motor       |
-                                      v
-                              Phase Accumulator
-                                      |
-                                      v
-                               Sine Lookup Table
-                                      |
-                                      v
-                                  12-bit DAC
-                                      |
-                                      v
-                               Internal Op-Amp
-                                      |
-                                      v
-                                Analog Output
-                                      |
-                                      v
-                                 Oscilloscope
-```
 
 ---
 
@@ -79,41 +48,6 @@ A major objective was to verify firmware behavior at the **physical electrical i
 
 ---
 
-## Repository Architecture
-
-The repository contains both the original academic implementation and a later architectural refactor.
-
-```text
-MSP430-Waveform-Generation/
-│
-├── README.md
-│
-├── src/
-│   ├── main.c
-│   ├── uart.c
-│   ├── uart.h
-│   ├── adc.c
-│   ├── adc.h
-│   ├── pwm.c
-│   ├── pwm.h
-│   ├── nco.c
-│   ├── nco.h
-│   ├── sac.c
-│   ├── sac.h
-│   ├── timer.c
-│   └── timer.h
-│
-├── legacy/
-│   └── original_lab_main.c
-│
-├── Images/
-│   ├── sac_high_speed_slew_rate.png
-│   ├── sac_low_speed_slew_rate.png
-│   └── sine_computation_timing.png
-│
-└── docs/
-    └── Lab_5_SAC.pdf
-```
 
 ### Original vs. Refactored Implementation
 
