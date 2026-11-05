@@ -214,7 +214,7 @@ P1OUT &= ~BIT1;
 
 The res*lting GPIO pulse could then be mea*ured with an oscilloscope.
 
-![Osci*loscope measurement of floating-po*nt sine execution time](./Images/s*ne_computation_timing.png)
+![Osci*loscope measurement of floating-po*nt sine execution time](./Images/sine_computation_timing.png)
 
 *GPIO *iming measurement around a floatin*-point sine calculation.*
 
@@ -259,13 +259,13 @@ I me*sured the response of the internal*DAC/op-amp path by switching the D*C bet
 
 ### High-Speed Mod*
 
-![High-speed SAC slew-rate measu*ement](./Images/sac_high_speed_sle*_rate.png)
+![High-speed SAC slew-rate measu*ement](./Images/sac_high_speed_slew_rate.png)
 
 *Measured high-speed S*C transition: approximately 1.65 V*µs.*
 
 ### Low-Speed Mode
 
-![Low-sp*ed SAC slew-rate measurement](./Im*ges/sac_low_speed_slew_rate.png)
+![Low-sp*ed SAC slew-rate measurement](./Images/sac_low_speed_slew_rate.png)
 
 *Measured low-speed SAC transition: approximately 0.33 V/µs.*
 
