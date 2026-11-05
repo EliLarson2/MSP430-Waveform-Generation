@@ -1,131 +1,276 @@
 # MSP430 Mixed-Signal Waveform Generator
 
-A mixed-signal embedded system built around the **Texas Instruments MSP430FR2355**, integrating UART communication, ADC acquisition, PWM motor control, hardware timers, interrupt-driven firmware, an internal 12-bit DAC and operational amplifier, and numerically controlled sine-wave generation.
+A register-level embedded C application built around the **Texas Instruments MSP430FR2355**, combining serial commands, analog acquisition, timer-driven PWM, waveform synthesis, and an internal DAC/op-amp signal path.
 
-The project began as a sequence of embedded-systems laboratory exercises and culminated in a UART-controlled application capable of interacting with multiple digital and analog peripherals.
+I developed this project to understand how individual microcontroller peripherals become a complete embedded system. A command received over UART can request an ADC measurement, change an actuator-control output, or start a synthesized analog waveform. Hardware timers provide deterministic timing, interrupts handle time-sensitive work, and the physical outputs were verified with an oscilloscope.
 
+Although the project originated as embedded-systems laboratory work, I later reorganized the firmware into separate modules for communication, sensing, timing, actuation, waveform generation, and analog output. The resulting architecture reflects the same basic problems found in robotics, UAV avionics, and control systems: **receive commands, acquire sensor data, update outputs predictably, and verify what the hardware actually does.**
 
----
-
-## Project Goals
-
-The primary goal of this project was to understand how peripherals inside a microcontroller can be combined into a complete embedded mixed-signal system.
-
-The project focused on:
-
-- Register-level MSP430 peripheral configuration
-- Interrupt-driven UART communication
-- ADC configuration and acquisition
-- Hardware timers
-- PWM generation and motor control
-- Internal DAC operation
-- Internal operational-amplifier configuration
-- Oscilloscope-based hardware verification
-- Numerically Controlled Oscillators
-- Lookup-table-based waveform generation
-- Integrating several peripherals through a common command interface
-
-A major objective was to verify firmware behavior at the **physical electrical interface**, rather than assuming correct code automatically meant correct hardware behavior.
+> **Clock assumption:** The timer and UART calculations in the current source assume the original laboratory configuration of a **24 MHz SMCLK**. The provided `src/` files do not include the clock-system configuration itself.
 
 ---
 
-## Hardware Platform
+## System Architecture
 
-| Category | Implementation |
-|---|---|
-| Microcontroller | Texas Instruments MSP430FR2355 |
-| Programming Language | Embedded C |
-| System Clock | 24 MHz |
-| Communication | UART at 57,600 baud |
-| ADC | Internal 12-bit ADC |
-| DAC | Internal 12-bit DAC |
-| Analog | Smart Analog Combo / internal op-amp |
-| Waveform Generation | 32-bit NCO |
-| Sine Lookup Table | 256 signed samples |
-| NCO Update Rate | 1 kHz |
-| Motor Control | Timer-generated PWM |
-| Measurement | Digital oscilloscope |
+The application connects a serial command interface to several digital and analog peripherals:
+
+```text
+                    Computer / Terminal
+                            |
+                     UART at 57,600 baud
+                            |
+                            v
+                 +----------------------+
+                 | Command Buffer and   |
+                 | Application Handler  |
+                 +----------+-----------+
+                            |
+          +-----------------+-----------------+
+          |                 |                 |
+          v                 v                 v
+     12-Bit ADC        Timer B1 PWM     NCO Frequency
+    Channels A1-A5     on P2.0 / TB1.1    Selection
+          |                 |                 |
+          v                 v                 v
+     UART Response      Control Output    Timer B0 ISR
+                                              |
+                                              v
+                                    32-Bit Phase Accumulator
+                                              |
+                                              v
+                                      256-Sample Sine LUT
+                                              |
+                                              v
+                                      12-Bit SAC3 DAC
+                                              |
+                                              v
+                                    Internal Op-Amp Buffer
+                                              |
+                                              v
+                                       P3.5 / OA3O
+                                              |
+                                              v
+                                         Oscilloscope
+```
+
+The strongest part of this project was not any one peripheral. It was coordinating the interfaces between them while keeping timing-sensitive work separate from slower application logic.
 
 ---
 
+## Firmware Architecture
 
-### Original vs. Refactored Implementation
-
-`legacy/original_lab_main.c` preserves the original academic implementation.
-
-The code under `src/` is a later refactor that separates the project into functional modules.
+The current implementation is divided by responsibility:
 
 | Module | Responsibility |
-|---|---|
-| `main.c` | System initialization and application loop |
-| `uart.c/.h` | UART reception and command processing |
-| `adc.c/.h` | ADC configuration and analog acquisition |
-| `pwm.c/.h` | PWM generation and motor control |
-| `nco.c/.h` | Phase accumulator and sine-wave generation |
-| `sac.c/.h` | Internal DAC and op-amp control |
-| `timer.c/.h` | Deterministic timing and waveform updates |
+| --- | --- |
+| [`main.c`](src/main.c) | System initialization and application loop |
+| [`uart.c`](src/uart.c) | UART reception, buffering, command decoding, and responses |
+| [`adc.c`](src/adc.c) | ADC setup and channel acquisition |
+| [`pwm.c`](src/pwm.c) | Timer-generated PWM and output-state commands |
+| [`nco.c`](src/nco.c) | Phase accumulation and sine lookup |
+| [`sac.c`](src/sac.c) | Internal DAC and op-amp configuration |
+| [`timer.c`](src/timer.c) | Periodic timing, LED updates, and DAC waveform updates |
 
-The objective of the refactor was to turn:
+`main.c` stops the watchdog, initializes each peripheral module, enables interrupts, and then enters a small application loop:
 
-```text
-One Large Application
-        |
-        v
-Direct Peripheral Access Everywhere
+```c
+while (1)
+{
+    if (uart_command_ready())
+    {
+        uart_process_command();
+    }
+}
 ```
 
-into:
+This keeps the top-level control flow easy to follow. Peripheral configuration stays inside its corresponding module, while the main loop responds to completed commands.
+
+### Interrupt and Application Separation
+
+The UART receive interrupt does not perform ADC conversions, change waveform frequencies, or execute motor commands directly. It receives one character at a time, builds a two-character command, and sets a ready flag:
 
 ```text
-Application Logic
-        |
-        v
-Peripheral Interfaces
-        |
-        v
-MCU Hardware
+UART RX Interrupt
+       |
+       v
+Receive Character
+       |
+       v
+Build Two-Character Command
+       |
+       v
+Set Command-Ready Flag
+       |
+       v
+Return From Interrupt
 ```
+
+Command interpretation happens later through `uart_process_command()` in normal application context:
+
+```text
+Main Loop
+   |
+   v
+Check Ready Flag
+   |
+   v
+Copy Command Safely
+   |
+   v
+Decode and Execute
+```
+
+This was an important improvement over placing all application behavior inside an interrupt handler. The ISR handles the timing-sensitive receive event, while slower operations remain outside interrupt context.
+
+Timer B0 has a different responsibility. Its interrupt occurs every millisecond and owns the periodic NCO/DAC update. Separating communication events from deterministic waveform timing makes the system easier to reason about and provides a useful pattern for embedded control firmware.
 
 ---
 
-# Smart Analog Combo
+## Numerically Controlled Oscillator
 
-The MSP430FR2355 includes configurable analog peripherals known as **Smart Analog Combos (SACs)**.
-
-For this project, SAC3 combines:
-
-- Internal 12-bit DAC
-- Internal operational amplifier
-- Voltage-follower operation
-- Externally accessible analog output
-
-Conceptually:
+The analog waveform is generated with a **32-bit numerically controlled oscillator**, or NCO. Instead of calculating a new sine value with a floating-point trigonometric function during every update, the firmware advances a phase accumulator and reads from a 256-entry lookup table.
 
 ```text
-Digital DAC Value
+Requested Frequency
+        |
+        v
+32-Bit Phase Increment
+        |
+        v
+32-Bit Phase Accumulator
+        |
+        | Upper 8 bits
+        v
+256-Entry Signed Sine LUT
+        |
+        v
+Signed 16-Bit Sample
+        |
+        v
+Offset and Scale to 12 Bits
+        |
+        v
+SAC3 DAC and Op-Amp
+```
+
+The NCO state is contained in `nco.c`:
+
+```c
+static uint32_t phase = 0;
+static uint32_t delta = 0;
+```
+
+The requested frequency determines the phase increment:
+
+```c
+void nco_set_frequency(float frequency_hz)
+{
+    const float scaling_factor = 4294967.296f; /* 2^32 / 1000 Hz */
+
+    delta =
+        (uint32_t)((scaling_factor * frequency_hz) + 0.5f);
+}
+```
+
+The scaling factor corresponds to `2^32 / 1000` because Timer B0 updates the NCO at 1 kHz. Each call to `nco_run()` advances the accumulator and uses its upper eight bits to select one of the 256 table entries:
+
+```c
+int16_t nco_run(void)
+{
+    phase += delta;
+    return sinLUT[phase >> 24];
+}
+```
+
+Using the upper eight bits naturally maps the 32-bit phase space onto the 256-entry table without division or floating-point sine calculation inside the timer interrupt.
+
+### Timer-Driven DAC Updates
+
+`timer.c` configures Timer B0 for a 1 ms period based on the assumed 24 MHz SMCLK and two divide-by-eight stages:
+
+```c
+TB0EX0 = TBIDEX_7;
+TB0CCR0 = 375U;
+TB0CTL = TBSSEL__SMCLK | ID__8 | MC__UP;
+```
+
+When waveform generation is enabled, the ISR obtains the next signed sample, offsets it into an unsigned range, reduces it to 12 bits, and sends it to the DAC:
+
+```c
+signed_sample = nco_run();
+
+dac_sample =
+    (uint16_t)(signed_sample + 32768L);
+
+dac_sample >>= 4;
+
+sac_set_dac(dac_sample);
+```
+
+This gives the waveform-generation path a fixed update schedule independent of how quickly the main loop processes commands.
+
+The UART interface currently exposes three output frequencies:
+
+| Command | Output behavior |
+| --- | --- |
+| `D0` | Stop the NCO and set the DAC to zero |
+| `D1` | Generate a 40 Hz sine wave |
+| `D2` | Generate an 80 Hz sine wave |
+| `D3` | Generate a 100 Hz sine wave |
+| `D4` | Stop the NCO and set the DAC to full scale |
+
+---
+
+## Why I Used a Lookup Table
+
+Before implementing the NCO, I measured the cost of directly evaluating floating-point `sin()` on the microcontroller.
+
+A GPIO was asserted immediately before the function call and cleared immediately afterward. Measuring the resulting pulse width with an oscilloscope converted software execution time into a physical signal:
+
+```c
+P1OUT |= BIT1;
+
+sin(2);
+
+P1OUT &= ~BIT1;
+```
+
+![Oscilloscope measurement of floating-point sine execution time](Images/sine_computation_timing.png)
+
+*GPIO pulse used to measure the execution time of a direct floating-point sine calculation.*
+
+The observed execution time ranged from approximately **0.6 ms to 2.1 ms**, with a representative measurement of approximately **1.89 ms**. At the 24 MHz laboratory clock, that representative result corresponds to roughly **45,360 clock cycles**.
+
+That timing experiment is not part of the current refactored source, but it motivated the implemented NCO architecture. A timer-driven waveform generator benefits from predictable work per update, so the final path uses integer addition, a bit shift, and a table lookup instead of repeatedly evaluating a trigonometric function.
+
+---
+
+## Mixed-Signal Output with SAC3
+
+The MSP430FR2355 Smart Analog Combo integrates digital and analog functions within the microcontroller. In `sac.c`, SAC3 is configured so its internal 12-bit DAC drives the internal op-amp in buffer/voltage-follower mode.
+
+```text
+12-Bit DAC Code
        |
        v
-+--------------+
-| 12-Bit DAC   |
-+--------------+
++----------------+
+| SAC3 DAC       |
++----------------+
        |
        v
-+--------------+
-| Internal     |
-| Op-Amp       |
-| Buffer       |
-+--------------+
++----------------+
+| Internal       |
+| Op-Amp Buffer  |
++----------------+
        |
        v
-     OA3O
+P3.5 / OA3O
        |
        v
 Oscilloscope
 ```
 
-The DAC creates the requested voltage while the internal op-amp buffers the signal before it reaches the external output.
-
-The refactored firmware abstracts direct DAC-register access:
+The output is routed to P3.5/OA3O. The current implementation selects the SAC high-speed/high-power operating mode and provides a small interface for writing DAC values:
 
 ```c
 void sac_set_dac(uint16_t value)
@@ -139,511 +284,29 @@ void sac_set_dac(uint16_t value)
 }
 ```
 
-Other modules can therefore use:
+Clamping the input at 4095 keeps callers from writing beyond the 12-bit DAC range. The module also provides explicit zero and full-scale helper functions used by the UART command handler.
 
-```c
-sac_set_dac(dac_sample);
-```
+### Measuring the Analog Response
 
-without needing to know how the SAC peripheral is implemented internally.
+I characterized the SAC output by switching the DAC between minimum and maximum codes and measuring the transition with an oscilloscope.
 
----
+![High-speed SAC slew-rate oscilloscope measurement](Images/sac_high_speed_slew_rate.png)
 
-# SAC Slew-Rate Characterization
+*Measured SAC DAC/op-amp transition in high-speed mode: approximately 1.65 V/µs.*
 
-Before implementing waveform generation, I characterized the analog response of the internal DAC and op-amp.
+![Low-speed SAC slew-rate oscilloscope measurement](Images/sac_low_speed_slew_rate.png)
 
-The DAC was repeatedly switched between minimum and maximum codes:
+*Measured SAC DAC/op-amp transition in low-speed mode: approximately 0.33 V/µs.*
 
-```c
-SAC3DAT = 0;
+The measured high-speed transition was approximately **1.65 V/µs**, compared with approximately **0.33 V/µs** in low-speed mode.
 
-/* delay */
-
-SAC3DAT = 4095;
-```
-
-The transition was measured using an oscilloscope under different SAC operating modes.
-
-## Measured Results
-
-| SAC Mode | Measured Slew Rate |
-|---|---:|
-| Low-Speed Mode | Approximately 0.33 V/µs |
-| High-Speed Mode | Approximately 1.65 V/µs |
-
-### High-Speed Mode
-
-Images/sac_high_speed_slew_rate.png
-
-### Low-Speed Mode
-
-Images/sac_low_speed_slew_rate.png
-
-The high-speed configuration produced a substantially faster transition than the low-speed configuration.
-
-The experiment also demonstrated that configured peripheral behavior should be **physically measured**, not inferred solely from firmware.
-
-Factors such as:
-
-- Probe capacitance
-- Output loading
-- Peripheral configuration
-- Measurement technique
-- Analog signal-path behavior
-
-can influence what appears at the real hardware interface.
+The specific values depend on the hardware configuration and measurement setup, but the experiment demonstrated an important embedded-hardware lesson: setting a peripheral register is not the same as verifying its physical behavior. The output still needs to be measured under the actual loading, probe, and signal-path conditions.
 
 ---
 
-# Measuring Floating-Point Sine Execution Time
+## ADC Acquisition
 
-Before implementing the NCO, I investigated the computational cost of directly calculating sine values.
-
-A GPIO pin was asserted immediately before calling `sin()` and cleared immediately afterward:
-
-```c
-P1OUT |= BIT1;
-
-sin(2);
-
-P1OUT &= ~BIT1;
-```
-
-The GPIO pulse width was then measured with an oscilloscope.
-
-This converts software execution time into an electrical signal that can be directly measured.
-
-## Results
-
-| Measurement | Result |
-|---|---:|
-| Observed computation range | Approximately 0.6 ms to 2.1 ms |
-| Representative measurement | Approximately 1.89 ms |
-| System clock | 24 MHz |
-| Approximate cycles at 1.89 ms | 45,360 cycles |
-
-Images/sine_computation_timing.png
-
-Repeatedly evaluating a floating-point trigonometric function would therefore consume a significant amount of processor time in a time-sensitive waveform generator.
-
-That observation motivated the NCO architecture.
-
----
-
-# Numerically Controlled Oscillator
-
-The waveform generator uses a **Numerically Controlled Oscillator**, or NCO.
-
-The implementation contains:
-
-- 32-bit phase accumulator
-- Frequency-dependent phase increment
-- 256-entry sine lookup table
-- Fixed 1 kHz update rate
-- 12-bit DAC output
-
-```text
-Requested Frequency
-        |
-        v
-Phase Increment
-        |
-        v
-+-------------------+
-| 32-Bit Phase      |
-| Accumulator       |
-+-------------------+
-        |
-        | Upper 8 bits
-        v
-+-------------------+
-| 256-Entry         |
-| Sine Lookup Table |
-+-------------------+
-        |
-        v
-Signed 16-Bit Sample
-        |
-        v
-Scale to 12 Bits
-        |
-        v
-Internal DAC
-        |
-        v
-Internal Op-Amp
-        |
-        v
-Analog Sine Wave
-```
-
----
-
-## Frequency Control
-
-The requested output frequency determines the amount added to the phase accumulator during every update:
-
-```c
-static uint32_t phase = 0;
-static uint32_t delta = 0;
-
-void nco_set_frequency(float frequency_hz)
-{
-    const float scaling_factor = 4294967.296f;
-
-    delta =
-        (uint32_t)((scaling_factor * frequency_hz)
-        + 0.5f);
-}
-```
-
-The scaling factor corresponds to:
-
-```text
-2^32 / 1000
-```
-
-because the NCO is updated at:
-
-```text
-1000 samples/second
-```
-
-The phase increment therefore determines how quickly the accumulator progresses through one conceptual waveform cycle.
-
----
-
-# Sine Lookup Table
-
-Instead of calculating `sin()` during each timer interrupt, one sinusoidal cycle is stored in a **256-entry lookup table**.
-
-A simplified portion looks like:
-
-```c
-static const int16_t sinLUT[256] =
-{
-       0,
-     804,
-    1608,
-    2410,
-
-    /* ... */
-
-   32767,
-
-    /* ... */
-
-       0,
-
-    /* ... */
-
-  -32767
-
-    /* ... */
-};
-```
-
-The NCO function is intentionally simple:
-
-```c
-int16_t nco_run(void)
-{
-    phase += delta;
-
-    return sinLUT[phase >> 24];
-}
-```
-
-The table contains:
-
-```text
-256 = 2^8
-```
-
-samples.
-
-The upper eight bits of the 32-bit accumulator are therefore used as the lookup-table index.
-
----
-
-## Why Use an NCO?
-
-Direct sine calculation requires considerably more computation.
-
-The NCO replaces repeated trigonometric evaluation with:
-
-```text
-Integer Addition
-      +
-Bit Shift
-      +
-Lookup Table Access
-```
-
-This makes waveform generation significantly more deterministic.
-
-The same basic architecture appears in more advanced systems involving:
-
-- Digital signal processing
-- Frequency synthesis
-- Digital communications
-- FPGA DSP
-- Digital mixers
-- Software-defined radio
-
----
-
-# Timer-Driven Waveform Generation
-
-The NCO is updated using a **1 kHz Timer B0 interrupt**.
-
-The waveform-generation path is:
-
-```text
-Timer Interrupt
-      |
-      v
-nco_run()
-      |
-      v
-Signed 16-Bit Sample
-      |
-      v
-Shift to Unsigned Range
-      |
-      v
-Reduce to 12 Bits
-      |
-      v
-DAC
-```
-
-The relevant implementation is:
-
-```c
-#pragma vector=TIMER0_B0_VECTOR
-__interrupt void TimerB0_ISR(void)
-{
-    int32_t signed_sample;
-    uint16_t dac_sample;
-
-    if (g_nco_enabled)
-    {
-        signed_sample = nco_run();
-
-        dac_sample =
-            (uint16_t)(signed_sample + 32768L);
-
-        dac_sample >>= 4;
-
-        sac_set_dac(dac_sample);
-    }
-}
-```
-
-The lookup table produces approximately:
-
-```text
--32767 ... +32767
-```
-
-Adding:
-
-```c
-32768
-```
-
-moves the waveform into an unsigned 16-bit range.
-
-Then:
-
-```c
-dac_sample >>= 4;
-```
-
-maps the value into the 12-bit range required by the DAC.
-
----
-
-# Generated Waveforms
-
-The original system supports three sinusoidal frequencies.
-
-| UART Command | Analog Output |
-|---|---|
-| `D1` | 40 Hz sine wave |
-| `D2` | 80 Hz sine wave |
-| `D3` | 100 Hz sine wave |
-
-Additional commands directly control the DAC:
-
-| Command | Analog Output |
-|---|---|
-| `D0` | NCO disabled, DAC = 0 V |
-| `D4` | NCO disabled, DAC ≈ 3.3 V |
-
----
-
-# UART Interface
-
-The final embedded application uses **eUSCI_A1 UART** at **57,600 baud**.
-
-UART provides one interface through which multiple peripherals can be controlled:
-
-```text
-Computer / Terminal
-        |
-       UART
-        |
-        v
-+-------------------+
-| Command Interface |
-+-------------------+
-    |    |    |    |
-    v    v    v    v
-  GPIO  ADC  PWM   NCO
-```
-
-The original implementation performed command decoding directly inside the UART ISR.
-
-The later refactor separates character reception from command execution.
-
-### Simplified UART Receive ISR
-
-```c
-#pragma vector=EUSCI_A1_VECTOR
-__interrupt void UART_ISR(void)
-{
-    uint8_t received_char = UCA1RXBUF;
-
-    if (command_index < UART_COMMAND_LENGTH)
-    {
-        command_buffer[command_index++] =
-            (char)received_char;
-    }
-
-    if (command_index >= UART_COMMAND_LENGTH)
-    {
-        command_buffer[command_index] = '\0';
-
-        command_ready = 1U;
-        command_index = 0U;
-    }
-}
-```
-
-The ISR handles communication timing.
-
-The main application performs the slower command interpretation.
-
-This separates:
-
-```text
-Interrupt Context
-      |
-Receive / Buffer
-      |
-      v
-Normal Application Context
-      |
-Decode / Execute
-```
-
----
-
-# UART Command Set
-
-The final application supports 17 commands.
-
-| Command | Description |
-|---|---|
-| `R0` | Turn red LED off |
-| `R1` | Turn red LED on |
-| `G0` | Turn green LED off |
-| `G1` | Turn green LED on |
-| `A1` | Measure ADC channel A1 |
-| `A2` | Measure ADC channel A2 |
-| `A3` | Measure ADC channel A3 |
-| `A4` | Measure ADC channel A4 |
-| `A5` | Measure ADC channel A5 |
-| `M0` | Stop motor |
-| `M1` | Rotate motor clockwise |
-| `M2` | Rotate motor counter-clockwise |
-| `D0` | Set analog output to 0 V |
-| `D1` | Generate 40 Hz sine wave |
-| `D2` | Generate 80 Hz sine wave |
-| `D3` | Generate 100 Hz sine wave |
-| `D4` | Set analog output to approximately 3.3 V |
-
----
-
-# Example: From UART Command to Analog Waveform
-
-Sending:
-
-```text
-D2
-```
-
-results in:
-
-```text
-Serial Terminal
-      |
-      | "D2"
-      v
-UART Peripheral
-      |
-      v
-UART RX Interrupt
-      |
-      v
-Command Buffer
-      |
-      v
-Command Parser
-      |
-      v
-nco_set_frequency(80)
-      |
-      v
-New Phase Increment
-      |
-      v
-1 kHz Timer Interrupt
-      |
-      v
-nco_run()
-      |
-      v
-Sine Lookup Table
-      |
-      v
-12-Bit DAC Value
-      |
-      v
-Internal DAC
-      |
-      v
-Internal Op-Amp
-      |
-      v
-80 Hz Analog Output
-      |
-      v
-Oscilloscope
-```
-
-This is one of the parts of the project I found most valuable because a two-character command ultimately generates a **measurable analog signal** through several layers of hardware and firmware.
-
----
-
-# ADC Integration
-
-The same serial interface controls the MSP430's **12-bit ADC**.
-
-The refactored implementation provides one function for channels A1 through A5:
+`adc.c` configures the internal ADC for **12-bit, single-channel, single-conversion operation**. The implementation supports channels A1 through A5 using one channel-selection function rather than separate code for each input:
 
 ```c
 uint16_t adc_read_channel(uint8_t channel)
@@ -654,49 +317,60 @@ uint16_t adc_read_channel(uint8_t channel)
     }
 
     ADCCTL0 &= ~ADCENC;
-
     ADCMCTL0 &= ~ADCINCH_15;
     ADCMCTL0 |= channel;
-
     ADCCTL0 |= ADCENC;
 
     return adc_get_reading();
 }
 ```
 
-The original implementation contained similar configuration blocks for every ADC command.
-
-The refactor reduces:
-
-```text
-A1 implementation
-A2 implementation
-A3 implementation
-A4 implementation
-A5 implementation
-```
-
-to:
+`adc_get_reading()` starts the conversion, waits while the ADC is busy, and returns `ADCMEM0`:
 
 ```c
-adc_read_channel(channel);
+ADCCTL0 |= ADCSC;
+
+while (ADCCTL1 & ADCBUSY)
+{
+}
+
+return ADCMEM0;
 ```
 
-The measured conversion result is then transmitted back through UART.
+The command handler converts `A1` through `A5` into a channel number, performs the conversion, and transmits the unsigned result over UART.
+
+This is a simple blocking implementation, but it demonstrates the full sensor-acquisition path:
+
+```text
+UART Channel Request
+        |
+        v
+Select ADC Input
+        |
+        v
+Start 12-Bit Conversion
+        |
+        v
+Wait for Completion
+        |
+        v
+Read ADCMEM0
+        |
+        v
+Return Value Over UART
+```
+
+That same pattern—select an input, acquire a measurement, and report it through a communication interface—is directly applicable to embedded sensing and control systems.
 
 ---
 
-# PWM Motor Control
+## PWM Output and Actuator Commands
 
-The application also integrates **Timer B1 PWM generation** for motor control.
+`pwm.c` uses Timer B1 to generate a PWM output on **P2.0 / TB1.1**.
 
-The PWM period is approximately:
+With the assumed 24 MHz SMCLK and two divide-by-eight stages, `TB1CCR0 = 7500` produces an approximately 20 ms PWM period. The output uses reset/set mode, while `TB1CCR1` controls the active pulse width.
 
-```text
-20 ms
-```
-
-and motor state is controlled using the capture/compare register.
+The firmware exposes three command states:
 
 ```c
 void motor_stop(void)
@@ -715,311 +389,165 @@ void motor_counterclockwise(void)
 }
 ```
 
-UART commands therefore connect directly to actuator behavior:
+The repository does not define the external motor hardware, so I treat this as a simple PWM-based actuator interface rather than claiming a specific motor or drive architecture.
 
-```text
-M0 -> Stop
-M1 -> Clockwise
-M2 -> Counter-Clockwise
-```
-
-This portion of the project later helped reinforce my understanding of PWM-based control in other embedded and avionics applications.
+The important firmware concept is that a serial command is translated into a deterministic hardware-timer output without software-generated pulse timing. That pattern is useful in robotics, UAV, and control applications where communication and actuator timing need to coexist.
 
 ---
 
-# Software Architecture
+## UART Command Interface
 
-The final refactor separates responsibilities across modules.
+The application uses eUSCI_A1 at **57,600 baud**, based on the original 24 MHz SMCLK configuration. Received commands are two characters long.
+
+| Command | Action |
+| --- | --- |
+| `R0` / `R1` | Turn the red LED off/on |
+| `G0` / `G1` | Turn the green LED off/on |
+| `A1`–`A5` | Read ADC channel A1–A5 and return the result |
+| `M0` | Set the PWM output to the stopped state |
+| `M1` | Set the clockwise PWM command |
+| `M2` | Set the counterclockwise PWM command |
+| `D0` | Disable the NCO and set the DAC to zero |
+| `D1` | Generate a 40 Hz sine wave |
+| `D2` | Generate an 80 Hz sine wave |
+| `D3` | Generate a 100 Hz sine wave |
+| `D4` | Disable the NCO and set the DAC to full scale |
+
+A command such as `D2` crosses several firmware and hardware boundaries:
 
 ```text
-                    +------------------+
-                    |      main.c      |
-                    |   Application    |
-                    +--------+---------+
-                             |
-         +-------------------+-------------------+
-         |          |           |       |       |
-         v          v           v       v       v
-       UART        ADC         PWM     NCO     SAC
-         |                               |
-         v                               v
-      RX ISR                         Timer ISR
+"D2" Received
+      |
+      v
+UART RX Interrupt
+      |
+      v
+Command Buffer
+      |
+      v
+Main-Loop Command Handler
+      |
+      v
+nco_set_frequency(80.0f)
+      |
+      v
+Timer B0 Update at 1 kHz
+      |
+      v
+Phase Accumulator and Sine LUT
+      |
+      v
+12-Bit DAC Code
+      |
+      v
+SAC3 Op-Amp Output
+      |
+      v
+Measured Analog Waveform
 ```
 
-## Timer ISR
-
-Responsible for:
-
-- Fixed update timing
-- NCO waveform generation
-- DAC updates
-- Periodic LED timing
-
-## UART ISR
-
-Responsible for:
-
-- Receiving serial data
-- Buffering commands
-- Signaling when a command is ready
-
-## Main Application
-
-Responsible for:
-
-- Command interpretation
-- ADC acquisition requests
-- Motor commands
-- NCO frequency changes
-- GPIO output control
+That end-to-end path—from communication input to a physical output—is the main reason I include this project in my portfolio.
 
 ---
 
-# Why I Refactored the Project
+## What I Would Improve Today
 
-The original academic implementation successfully demonstrated the required functionality but placed much of the application behavior inside a single firmware file and UART ISR.
+The current implementation is intentionally small and understandable, but several changes would make it easier to expand into a larger embedded-control application.
 
-That was appropriate for quickly demonstrating laboratory requirements.
+First, I would replace the fixed two-character command format with a parser that supports variable-length commands, parameters, acknowledgments, and explicit error responses. That would allow commands such as a requested waveform frequency or PWM value instead of limiting the interface to predefined states.
 
-After gaining additional embedded and hardware-development experience, I revisited the software and reorganized it by responsibility.
+I would also make ADC acquisition nonblocking. The current implementation polls `ADCBUSY`, which is reasonable for a simple command-driven measurement but prevents the application from doing other work during conversion. An interrupt-driven or event-based ADC path would fit better in a system sampling multiple sensors while continuing to process communication and control tasks.
 
-The original implementation remains available in:
+The module boundaries could also be strengthened. The current files organize register access by peripheral, but application behavior still depends directly on global flags and command-specific hardware calls. I would introduce clearer application-level interfaces and keep MCU-specific register configuration behind the peripheral layer.
 
-```text
-legacy/original_lab_main.c
-```
-
-The refactored version is located in:
-
-```text
-src/
-```
-
-This preserves the actual coursework while also demonstrating how I would structure the system today.
-
-### Original
-
-```text
-UART ISR
-   |
-   +--> LED Control
-   +--> ADC Control
-   +--> PWM Control
-   +--> NCO Control
-   +--> DAC Control
-```
-
-### Refactored
-
-```text
-UART ISR
-   |
-   v
-Receive Buffer
-   |
-   v
-Command Handler
-   |
-   +--> adc.c
-   +--> pwm.c
-   +--> nco.c
-   +--> sac.c
-```
-
-Benefits include:
-
-- Smaller interrupt handlers
-- Better separation of responsibilities
-- Reusable peripheral interfaces
-- Easier debugging
-- Better readability
-- Easier maintenance
-- More scalable firmware architecture
+Finally, I would add host-side tests for command parsing and NCO calculations, along with explicit status reporting for invalid commands, unavailable channels, and peripheral failures. These changes would improve testability without making the time-critical interrupt paths more complicated.
 
 ---
 
-# What I Learned
+## Relevance to Robotics, UAVs, and Control Systems
 
-This project connected several subjects that can otherwise feel like isolated microcontroller peripherals.
+This project was not deployed on a robot or aircraft, but its architecture maps naturally to those systems:
 
-### Embedded Firmware
+```text
+Command or Telemetry Input
+            |
+            v
+Application State and Control Logic
+            |
+       +----+----+
+       |         |
+       v         v
+Sensor Input   Actuator Output
+   ADC           PWM
+       \         /
+        \       /
+         v     v
+      Deterministic Timing
+              |
+              v
+     Physical Measurement
+```
 
-- Embedded C
-- Register-level programming
-- Interrupt Service Routines
-- UART
-- Serial command parsing
-- Peripheral abstraction
+Robotics and UAV firmware regularly combines sensor acquisition, timed control outputs, serial communication, and hardware validation. The specific peripherals may change, but the architectural questions remain similar:
 
-### Digital Systems
+- What work belongs in an interrupt?
+- What work can wait for normal application context?
+- Which outputs require hardware-timed behavior?
+- How should sensor and actuator interfaces be separated?
+- How can software behavior be verified at the electrical interface?
 
-- Hardware timers
-- PWM
-- Phase accumulation
-- Lookup tables
-- Deterministic update timing
+This project gave me practical experience answering those questions on real hardware rather than treating each peripheral as an isolated exercise.
 
-### Analog Electronics
+---
 
-- ADC conversion
-- DAC output
-- Internal operational amplifiers
-- Voltage buffering
-- Slew rate
-- Mixed-signal interfaces
+## Repository Structure
 
-### Signal Processing
+```text
+.
+├── README.md
+├── Images/
+│   ├── sac_high_speed_slew_rate.png
+│   ├── sac_low_speed_slew_rate.png
+│   └── sine_computation_timing.png
+└── src/
+    ├── README_BUILD_NOTE.md
+    ├── adc.c
+    ├── adc.h
+    ├── main.c
+    ├── nco.c
+    ├── nco.h
+    ├── pwm.c
+    ├── pwm.h
+    ├── sac.c
+    ├── sac.h
+    ├── timer.c
+    ├── timer.h
+    ├── uart.c
+    └── uart.h
+```
 
-- Numerically Controlled Oscillators
-- Phase increments
-- Lookup-table synthesis
-- Sampling/update rates
-- Waveform generation
+---
 
-### Hardware Validation
+## Project Background
 
-- Oscilloscope operation
-- Execution-time measurement
-- Signal measurement
-- Comparing expected and measured behavior
+This project originated from embedded-systems laboratory work using the MSP430FR2355. Those exercises introduced UART, ADC conversion, hardware timers, PWM, motor commands, the Smart Analog Combo, and waveform generation.
 
-The biggest takeaway was understanding the full path:
+I later reorganized the firmware so those features operate as parts of one modular mixed-signal application. The most important takeaway was learning to follow behavior through the entire system:
 
 ```text
 Software Command
        |
        v
-Digital Logic
+Application Logic
        |
        v
-MCU Peripheral
+Timer or Peripheral
        |
        v
-Analog Electronics
+Digital or Analog Output
        |
        v
-Physical Signal
-       |
-       v
-Measurement
+Physical Measurement
 ```
 
----
-
-# Future Improvements
-
-## Arbitrary Output Frequencies
-
-Instead of supporting only 40, 80, and 100 Hz, the command interface could accept a requested frequency directly.
-
-Example:
-
-```text
-F125
-```
-
-could request:
-
-```text
-125 Hz
-```
-
-and automatically calculate the required phase increment.
-
----
-
-## Spectral Characterization
-
-A future revision could use FFT analysis or a spectrum analyzer to measure:
-
-- Fundamental frequency
-- Harmonics
-- Quantization artifacts
-- LUT artifacts
-- Noise floor
-- Spurious output
-
----
-
-## Lookup-Table Analysis
-
-Different lookup table sizes could be compared.
-
-| LUT Size | Tradeoff |
-|---:|---|
-| 64 | Low memory use, coarse waveform |
-| 128 | Moderate memory use |
-| 256 | Current implementation |
-| 512 | Greater resolution, higher memory use |
-
----
-
-## FPGA Implementation
-
-The NCO is particularly well suited for implementation in programmable logic.
-
-A future VHDL version could use:
-
-```text
-Phase Accumulator
-      |
-      v
-ROM-Based Sine LUT
-      |
-      v
-Sample Stream
-```
-
-This would directly connect the MSP430 project with my FPGA/VHDL experience.
-
----
-
-## RF / SDR Extension
-
-The NCO and DSP concepts also provide a foundation for software-defined radio.
-
-A future signal chain could become:
-
-```text
-NCO
- |
- v
-Digital Mixer
- |
- v
-Filter
- |
- v
-Sample Stream
- |
- v
-Spectrum / Demodulation
-```
-
-This project therefore serves as an early foundation for continued work in:
-
-- Embedded systems
-- Digital signal processing
-- FPGA development
-- RF systems
-- Hardware/software integration
-
----
-
-# Project Background
-
-This project originated from embedded-systems laboratory work performed on the MSP430FR2355.
-
-The laboratory sequence introduced:
-
-- ADC operation
-- UART communication
-- Hardware timers
-- PWM
-- Motor control
-- Smart Analog Combo configuration
-- DAC generation
-- Operational-amplifier characterization
-- NCO waveform synthesis
-
-Rather than presenting each exercise as an unrelated lab, this repository documents how those concepts combined into a **single embedded mixed-signal system** and how I later reorganized the original firmware into a cleaner architecture.
+That combination of **embedded firmware architecture, deterministic timing, sensor and actuator interfaces, mixed-signal hardware, and oscilloscope-based validation** is the experience I want to continue building on in robotics, UAV avionics, and control-system development.
